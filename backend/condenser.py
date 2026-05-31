@@ -110,8 +110,8 @@ def condense_session_if_needed(
         # 9. Flag raw turns as condensed (hiding them from active prompts)
         mark_messages_condensed(message_ids)
         
-        # 10. Delete associated vector points in Qdrant Cloud to clean up RAG retrieval space
-        delete_message_vectors(message_ids)
+        # 10. Keep raw vectors in Qdrant Cloud to allow high-threshold semantic recall
+        # delete_message_vectors(message_ids)
         
         print(f"DEBUG [Condenser]: Condensation completed successfully. Archived {condense_size} turns into Summary node '{summary_msg_db.id}'.")
         return True

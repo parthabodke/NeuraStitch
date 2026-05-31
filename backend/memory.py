@@ -176,8 +176,13 @@ def search_similar_message_ids(session_id: str, query: str, top_k: int = 4, api_
     except Exception as e:
         print(f"WARNING: Qdrant search execution failed: {e}")
         
-    # Extract PostgreSQL message UUIDs
-    return [hit.payload.get("message_id") for hit in results if hit.payload]
+    # Extract PostgreSQL message UUIDs, applying a strict 0.82 similarity threshold
+    # to prevent irrelevant or stale history turns from bloating the active prompt context.
+    return [
+        hit.payload.get("message_id") 
+        for hit in results 
+        if hit.payload and getattr(hit, "score", 0.0) >= 0.82
+    ]
 
 
 def delete_message_vectors(message_ids: List[str]):
