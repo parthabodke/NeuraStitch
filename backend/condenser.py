@@ -18,7 +18,8 @@ def condense_session_if_needed(
     keys: Dict[str, str],
     active_node_id: str = None,
     max_raw_turns: int = 8,
-    condense_size: int = 4
+    condense_size: int = 4,
+    user_id: str = None
 ) -> bool:
     """
     Automated Branch-Aware Context Condensation.
@@ -83,7 +84,8 @@ def condense_session_if_needed(
             content=f"Summary of archived chat turns:\n{summary_card}",
             parent_node_id=parent_anchor_id,
             branch_id=branch_id,
-            model_used=active_model
+            model_used=active_model,
+            user_id=user_id
         )
         
         # 8. Re-wire the first uncondensed node AFTER the condensed block to point to the summary card
@@ -118,3 +120,123 @@ def condense_session_if_needed(
     except Exception as e:
         print(f"ERROR [Condenser]: Condensation process failed. Error: {e}")
         return False
+
+
+def update_user_profile_if_needed(
+    user_id: str,
+    user_message: str,
+    assistant_message: str,
+    active_model: str,
+    keys: dict
+):
+    """
+    Background worker that analyzes the latest chat turn to incrementally update
+    a structured JSON profile of personalization facts for the user.
+    """
+    if not user_id:
+        return
+        
+    import json
+    import re
+    from database import SessionLocal, User
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user or not user.share_profile_memory:
+            return  # User disabled long-term memory sharing or not found
+            
+        current_profile_str = user.personal_profile or "{}"
+        
+        # Parse or default
+        try:
+            current_profile = json.loads(current_profile_str)
+            if not isinstance(current_profile, dict):
+                current_profile = {}
+        except Exception:
+            current_profile = {}
+            
+        # Ensure schema categories exist
+        schema_keys = ["biographical", "professional", "interests", "other_notes"]
+        for sk in schema_keys:
+            if sk not in current_profile:
+                current_profile[sk] = {} if sk != "other_notes" else []
+        
+        if not isinstance(current_profile["biographical"], dict):
+            current_profile["biographical"] = {}
+        if not isinstance(current_profile["professional"], dict):
+            current_profile["professional"] = {}
+        if not isinstance(current_profile["interests"], dict):
+            current_profile["interests"] = {}
+        if not isinstance(current_profile["other_notes"], list):
+            current_profile["other_notes"] = []
+            
+        if "likes" not in current_profile["interests"]:
+            current_profile["interests"]["likes"] = []
+        if "dislikes" not in current_profile["interests"]:
+            current_profile["interests"]["dislikes"] = []
+        if "topics" not in current_profile["interests"]:
+            current_profile["interests"]["topics"] = []
+        if "skills" not in current_profile["professional"]:
+            current_profile["professional"]["skills"] = []
+
+        latest_turn_text = f"User: {user_message}\nAssistant: {assistant_message}"
+        
+        prompt_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a long-term Personal Profile Consolidation Agent.\n"
+                    "Your task is to incrementally update the user's structured JSON profile based on the latest chat exchange.\n\n"
+                    "You are given:\n"
+                    "1. The CURRENT user profile JSON.\n"
+                    "2. The LATEST interaction exchange.\n\n"
+                    "Analyze the exchange and identify any persistent biographical facts, professional context (role, skills, OS), interests (likes, dislikes, topics), or general preferences.\n"
+                    "You MUST:\n"
+                    "- Add new facts to their respective category arrays or key-value fields. Keep facts concise and clear (e.g. \"React\", \"Python\").\n"
+                    "- Correct/overwrite existing fields if the user explicitly contradicts or updates past facts (e.g., if location, job, or OS changes).\n"
+                    "- Resolve duplicates: do NOT add semantically identical items (e.g. \"enjoys React\" and \"React\").\n"
+                    "- Output the updated COMPLETE JSON profile. Do NOT output a diff. Return the full JSON.\n\n"
+                    "Output format: You MUST return ONLY a valid JSON object matching the current schema structure. "
+                    "Do NOT include any conversational text, markdown code blocks, or explanations. Just return the raw JSON object."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"CURRENT PROFILE:\n{json.dumps(current_profile, indent=2)}\n\nLATEST CHAT EXCHANGE:\n{latest_turn_text}"
+            }
+        ]
+        
+        response_text = call_model_sync(active_model, prompt_messages, keys).strip()
+        print(f"DEBUG [ProfileSync]: Raw LLM response: {response_text}")
+        
+        # Clean up markdown JSON wrappers
+        clean_json = response_text
+        if clean_json.startswith("```"):
+            lines = clean_json.split("\n")
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            clean_json = "\n".join(lines).strip()
+            
+        start_idx = clean_json.find("{")
+        end_idx = clean_json.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            clean_json = clean_json[start_idx:end_idx+1]
+            
+        try:
+            updated_profile = json.loads(clean_json)
+            if isinstance(updated_profile, dict):
+                # Save it back
+                user.personal_profile = json.dumps(updated_profile)
+                db.commit()
+                print(f"DEBUG [ProfileSync]: Successfully synchronized personalization profile for user {user_id}.")
+            else:
+                print(f"WARNING [ProfileSync]: LLM output was not a dictionary: {response_text}")
+        except Exception as err:
+            print(f"ERROR [ProfileSync]: Failed to parse updated profile JSON: {err}")
+    except Exception as e:
+        print(f"ERROR [ProfileSync]: Profile sync failed: {e}")
+    finally:
+        db.close()
+

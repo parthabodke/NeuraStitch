@@ -15,7 +15,12 @@ import {
   EyeOff,
   GitBranch,
   Settings,
-  Plus
+  Plus,
+  Menu,
+  X,
+  ChevronLeft,
+  ChevronRight,
+  Folder
 } from 'lucide-react'
 import { 
   ReactFlow, 
@@ -57,7 +62,9 @@ const CustomNode = ({ data }: any) => {
 
   // Unified Interaction Node (Double Pane)
   return (
-    <div className="rounded-xl border w-[360px] text-left glass-panel transition-all shadow-2xl hover:scale-[1.01] border-slate-700/50 bg-[#0c1220]/80 overflow-hidden">
+    <div className={`rounded-xl border w-[360px] text-left glass-panel transition-all shadow-2xl hover:scale-[1.01] overflow-hidden ${
+      data.isActive ? 'border-emerald-500/80 shadow-[0_0_20px_rgba(16,185,129,0.25)] bg-[#0e1c2e]/90' : 'border-slate-700/50 bg-[#0c1220]/80'
+    }`}>
       <Handle type="target" position={Position.Top} className="!bg-slate-500" />
       
       {/* Top Panel - User Query */}
@@ -66,6 +73,11 @@ const CustomNode = ({ data }: any) => {
           <span className="px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20">
             User Query
           </span>
+          {data.isActive && (
+            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse">
+              Active Target
+            </span>
+          )}
         </div>
         <div className="text-xs text-slate-200 leading-relaxed whitespace-pre-wrap max-h-[120px] overflow-y-auto pr-1 custom-scrollbar">
           {data.user_content}
@@ -119,6 +131,18 @@ const nodeTypes = {
 }
 
 export default function FreePlayground() {
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [sidebarTab, setSidebarTab] = useState<'sessions' | 'settings'>('sessions')
+  const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' }[]>([])
+
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9)
+    setToasts(prev => [...prev, { id, message, type }])
+    setTimeout(() => {
+      setToasts(prev => prev.filter(t => t.id !== id))
+    }, 4000)
+  }, [])
+
   const [stage, setStage] = useState<'wallet' | 'playground'>('wallet')
   
   // BYOK Credentials Keys
@@ -126,6 +150,8 @@ export default function FreePlayground() {
   const [geminiKey, setGeminiKey] = useState('')
   const [groqKey, setGroqKey] = useState('')
   const [openrouterKey, setOpenrouterKey] = useState('')
+
+
 
   // Concealed visual eye flags
   const [showOpenai, setShowOpenai] = useState(false)
@@ -148,7 +174,7 @@ export default function FreePlayground() {
   const [streamedAssistantText, setStreamedAssistantText] = useState('')
   
   // Dual View States
-  const [viewMode, setViewMode] = useState<'chat' | 'graph'>('chat')
+  const [viewMode, setViewMode] = useState<'chat' | 'graph'>('graph')
   const [activePathMessages, setActivePathMessages] = useState<LocalNode[]>([])
   
   const loadActivePath = useCallback(async () => {
@@ -175,8 +201,45 @@ export default function FreePlayground() {
   }, [activeSessionId, activeLeafNodeId, loadActivePath])
 
   // React Flow viewports state hooks
-  const [nodes, setNodes, onNodesChange] = useNodesState([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  const [nodes, setNodes, onNodesChange] = useNodesState<any>([])
+  const [edges, setEdges, onEdgesChange] = useEdgesState<any>([])
+
+  // Helper to jump/focus React Flow or scroll Chat View to a specific node
+  const handleJumpToNode = useCallback((nodeId: string) => {
+    setActiveLeafNodeId(nodeId)
+    setNodes(prev => prev.map(n => ({
+      ...n,
+      selected: n.id === nodeId
+    })))
+    
+    setTimeout(() => {
+      const graphEl = document.querySelector(`[data-id="${nodeId}"]`)
+      if (graphEl) {
+        graphEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' })
+        return
+      }
+      
+      const chatEl = document.getElementById(nodeId)
+      if (chatEl) {
+        chatEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+    }, 150)
+  }, [setNodes])
+
+  const onNodeClick = useCallback((event: React.MouseEvent, node: any) => {
+    setActiveLeafNodeId(node.id)
+  }, [])
+
+  // Sync active Leaf node state dynamically across React Flow nodes data
+  useEffect(() => {
+    setNodes(prev => prev.map(n => ({
+      ...n,
+      data: {
+        ...n.data,
+        isActive: n.id === activeLeafNodeId
+      }
+    })))
+  }, [activeLeafNodeId, setNodes])
 
   // --- Initialize Local Sessions & Credentials ---
   useEffect(() => {
@@ -289,7 +352,7 @@ export default function FreePlayground() {
     // Spawn a new visual branch UUID
     const branchName = `branch-${Math.random().toString(36).substring(2, 6)}`
     setActiveBranchId(branchName)
-    alert(`Active prompt leaf set to node! Future chat turns will branch into path: '${branchName}'`)
+    showToast("Active parent node set! Next prompt will branch dynamically.", "info")
   }, [])
 
   // --- Redraw visual canvas using client IndexedDB nodes tree layout ---
@@ -347,7 +410,8 @@ export default function FreePlayground() {
             assistant_model: assistantChild.model_used || 'Unknown',
             assistant_timestamp: assistantChild.timestamp,
             parent_node_id: n.parent_node_id,
-            is_condensed: assistantChild.is_condensed
+            is_condensed: assistantChild.is_condensed,
+            branch_id: assistantChild.branch_id
           })
         } else {
           // Unpaired user node (streaming or aborted)
@@ -364,7 +428,8 @@ export default function FreePlayground() {
             assistant_model: null,
             assistant_timestamp: null,
             parent_node_id: n.parent_node_id,
-            is_condensed: n.is_condensed
+            is_condensed: n.is_condensed,
+            branch_id: n.branch_id
           })
         }
       } else if (n.role === 'system_summary') {
@@ -377,7 +442,8 @@ export default function FreePlayground() {
           content: n.content,
           timestamp: n.timestamp,
           parent_node_id: n.parent_node_id,
-          is_condensed: n.is_condensed
+          is_condensed: n.is_condensed,
+          branch_id: n.branch_id
         })
       } else if (n.role === 'assistant') {
         // Orphaned assistant fallback
@@ -394,7 +460,8 @@ export default function FreePlayground() {
           assistant_model: n.model_used || 'Unknown',
           assistant_timestamp: n.timestamp,
           parent_node_id: n.parent_node_id,
-          is_condensed: n.is_condensed
+          is_condensed: n.is_condensed,
+          branch_id: n.branch_id
         })
       }
     })
@@ -492,7 +559,8 @@ export default function FreePlayground() {
         position: { x: xPos, y: yPos },
         data: {
           ...item,
-          onBranch: handleBranchNode
+          onBranch: handleBranchNode,
+          isActive: item_id === activeLeafNodeId
         }
       })
 
@@ -510,7 +578,7 @@ export default function FreePlayground() {
 
     setNodes(reactNodes)
     setEdges(reactEdges)
-  }, [activeSessionId, handleBranchNode, setNodes, setEdges])
+  }, [activeSessionId, activeLeafNodeId, handleBranchNode, setNodes, setEdges])
 
   // --- Update streaming text inside the active visual node locally ---
   useEffect(() => {
@@ -659,7 +727,7 @@ export default function FreePlayground() {
 
     } catch (e: any) {
       console.error(e)
-      alert(`API Streaming Outage: ${e.message}`)
+      showToast(`API Streaming Outage: ${e.message}`, "error")
     } finally {
       setIsStreaming(false)
       setStreamedAssistantText('')
@@ -848,42 +916,151 @@ export default function FreePlayground() {
       {/* CORE WORKSPACE SECTION */}
       <div className="flex-1 flex overflow-hidden">
         
-        {/* SIDEBAR - SESSIONS LIST */}
-        <aside className="w-72 border-r border-white/5 glass-panel flex flex-col p-4 z-10">
-          <button
-            onClick={handleCreateSession}
-            className="flex items-center justify-center gap-2 w-full py-2.5 px-4 mb-4 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/20 text-indigo-400 hover:text-indigo-300 text-xs font-bold transition"
-          >
-            <Plus className="w-4 h-4" />
-            Create Local Session
-          </button>
-
-          <div className="flex-1 overflow-y-auto space-y-2">
-            {sessions.map(s => (
-              <div
-                key={s.id}
-                onClick={() => {
-                  setActiveSessionId(s.id)
-                  setActiveLeafNodeId(null)
-                  setActiveBranchId('main')
-                }}
-                className={`flex items-center justify-between p-3 rounded-xl border text-left cursor-pointer transition ${
-                  activeSessionId === s.id ? 'border-indigo-500/30 bg-indigo-950/10' : 'border-white/5 hover:border-white/10 hover:bg-white/5'
-                }`}
+        {/* COLLAPSIBLE CONTROL CENTER SIDEBAR */}
+        <aside className={`border-r border-white/5 bg-[#090e1a]/95 backdrop-blur-md transition-all duration-300 ease-in-out z-20 flex flex-row overflow-hidden ${
+          sidebarOpen ? 'w-80' : 'w-16'
+        }`}>
+          
+          {/* Vertical Icon Strip (Left side of sidebar) */}
+          <div className="w-16 border-r border-white/5 flex flex-col items-center py-4 justify-between bg-slate-950/20">
+            <div className="flex flex-col gap-4 items-center w-full">
+              {/* Sidebar toggle arrow */}
+              <button 
+                onClick={() => setSidebarOpen(!sidebarOpen)} 
+                className="p-2.5 rounded-xl hover:bg-white/5 text-slate-400 hover:text-white transition cursor-pointer"
+                title={sidebarOpen ? "Collapse Sidebar" : "Expand Sidebar"}
               >
-                <div className="flex flex-col gap-0.5 overflow-hidden">
-                  <span className="text-xs font-bold text-slate-200 truncate">{s.title}</span>
-                  <span className="text-[9px] text-slate-500 font-mono truncate">{s.id}</span>
-                </div>
-                <button
-                  onClick={(e) => handleDeleteSession(s.id, e)}
-                  className="p-1 text-slate-600 hover:text-red-400 hover:bg-white/5 rounded transition"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            ))}
+                {sidebarOpen ? <ChevronLeft className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+              </button>
+              
+              <div className="h-[1px] w-8 bg-white/5 my-2" />
+              
+              {/* Sessions Tab */}
+              <button 
+                onClick={() => { setSidebarTab('sessions'); setSidebarOpen(true); }} 
+                className={`p-2.5 rounded-xl transition cursor-pointer ${sidebarTab === 'sessions' ? 'bg-indigo-600/20 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:text-slate-300'}`}
+                title="Local Sessions"
+              >
+                <Folder className="w-4 h-4" />
+              </button>
+              
+              {/* Settings Tab */}
+              <button 
+                onClick={() => { setSidebarTab('settings'); setSidebarOpen(true); }} 
+                className={`p-2.5 rounded-xl transition cursor-pointer ${sidebarTab === 'settings' ? 'bg-indigo-600/20 text-indigo-400 border border-indigo-500/20' : 'text-slate-500 hover:text-slate-300'}`}
+                title="Playground Parameters"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <div className="text-[10px] text-slate-600 font-mono tracking-widest uppercase rotate-90 select-none pb-4">
+              Local
+            </div>
           </div>
+
+          {/* Expanded Content Drawer (Right side of sidebar) */}
+          {sidebarOpen && (
+            <div className="flex-1 flex flex-col p-4 overflow-hidden w-64 animate-fade-in">
+              
+              {/* SESSIONS TAB */}
+              {sidebarTab === 'sessions' && (
+                <div className="flex-grow flex flex-col overflow-hidden">
+                  <button
+                    onClick={handleCreateSession}
+                    className="flex items-center justify-center gap-2 w-full py-2.5 px-4 mb-4 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/20 text-indigo-400 hover:text-indigo-300 text-xs font-bold transition cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Create Local Session
+                  </button>
+
+                  <div className="flex-grow overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                    <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2 px-1">Local Sessions List</h3>
+                    {sessions.length === 0 ? (
+                      <div className="text-[11px] text-slate-500 italic p-3 text-center">
+                        No active sessions.
+                      </div>
+                    ) : (
+                      sessions.map(s => (
+                        <div
+                          key={s.id}
+                          onClick={() => {
+                            setActiveSessionId(s.id)
+                            setActiveLeafNodeId(null)
+                            setActiveBranchId('main')
+                          }}
+                          className={`flex items-center justify-between p-3 rounded-xl border text-left cursor-pointer transition ${
+                            activeSessionId === s.id ? 'border-indigo-500/30 bg-indigo-950/10' : 'border-white/5 hover:border-white/10 hover:bg-white/5'
+                          }`}
+                        >
+                          <div className="flex flex-col gap-0.5 overflow-hidden">
+                            <span className="text-xs font-bold text-slate-200 truncate">{s.title}</span>
+                            <span className="text-[9px] text-slate-500 font-mono truncate">{s.id}</span>
+                          </div>
+                          <button
+                            onClick={(e) => handleDeleteSession(s.id, e)}
+                            className="p-1 text-slate-600 hover:text-red-400 hover:bg-white/5 rounded transition cursor-pointer"
+                            title="Delete session"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+
+
+              {/* SETTINGS TAB */}
+              {sidebarTab === 'settings' && (
+                <div className="flex-grow flex flex-col overflow-hidden space-y-4">
+                  <div className="mb-2 border-b border-white/5 pb-2">
+                    <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <Settings className="w-3.5 h-3.5 text-indigo-400" />
+                      Parameters Settings
+                    </h3>
+                  </div>
+
+                  {/* Active Model Selector */}
+                  <div className="space-y-1">
+                    <label className="block text-[9px] font-semibold text-slate-500 uppercase tracking-wider">Active Model</label>
+                    <div className="flex items-center gap-2 bg-white/5 px-3 py-2 rounded-xl border border-white/5">
+                      <select
+                        value={activeModel}
+                        onChange={(e) => setActiveModel(e.target.value)}
+                        className="bg-transparent text-xs text-slate-200 border-none outline-none font-mono cursor-pointer w-full"
+                      >
+                        {availableModels.length > 0 ? (
+                          availableModels.map(m => <option key={m} value={m} className="bg-[#0b0f19]">{m}</option>)
+                        ) : (
+                          <>
+                            <option value="gemini-2.5-flash" className="bg-[#0b0f19]">gemini-2.5-flash</option>
+                            <option value="gpt-4o-mini" className="bg-[#0b0f19]">gpt-4o-mini</option>
+                            <option value="llama-3.1-8b-instant" className="bg-[#0b0f19]">llama-3.1-8b-instant</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1">
+                    <label className="block text-[9px] font-semibold text-slate-500 uppercase tracking-wider">Active Session ID</label>
+                    <input
+                      type="text"
+                      value={activeSessionId}
+                      onChange={(e) => {
+                        setActiveSessionId(e.target.value)
+                      }}
+                      className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/5 text-white text-[11px] font-mono outline-none focus:border-indigo-500/50"
+                    />
+                  </div>
+                </div>
+              )}
+
+            </div>
+          )}
         </aside>
 
         {/* REACT FLOW TREE CANVAS or SEQUENTIAL CHAT VIEW */}
@@ -895,6 +1072,7 @@ export default function FreePlayground() {
                 edges={edges}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
+                onNodeClick={onNodeClick}
                 nodeTypes={nodeTypes}
                 fitView
                 minZoom={0.2}
@@ -1006,6 +1184,31 @@ export default function FreePlayground() {
           </div>
 
         </main>
+
+      {/* Toast Notification Layer */}
+      <div className="fixed bottom-6 right-6 z-[9999] flex flex-col gap-2 max-w-sm w-full">
+        {toasts.map(t => (
+          <div
+            key={t.id}
+            className={`flex items-center justify-between px-4 py-3 rounded-xl border shadow-xl backdrop-blur-md transition-all duration-300 ${
+              t.type === 'success' 
+                ? 'bg-emerald-950/90 border-emerald-500/30 text-emerald-200' 
+                : t.type === 'error'
+                ? 'bg-red-950/90 border-red-500/30 text-red-200'
+                : 'bg-slate-900/90 border-slate-700/50 text-slate-200'
+            }`}
+          >
+            <span className="text-xs font-sans font-medium leading-relaxed">{t.message}</span>
+            <button 
+              type="button"
+              onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))}
+              className="ml-3 hover:text-white text-[10px] opacity-60 hover:opacity-100 transition cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+      </div>
 
       </div>
     </div>

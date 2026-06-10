@@ -46,7 +46,7 @@ export async function getLocalPathToNode(nodeId: string): Promise<LocalNode[]> {
     if (visited.has(currentId)) break;
     visited.add(currentId);
 
-    const node = await db.nodes.get(currentId);
+    const node: LocalNode | undefined = await db.nodes.get(currentId);
     if (!node) break;
 
     path.push(node);

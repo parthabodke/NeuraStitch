@@ -24,6 +24,42 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+class User(Base):
+    """
+    Relational User Store.
+    Manages emails, authentication credentials, and premium tier flags.
+    """
+    __tablename__ = "users"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=True)  # Nullable to support direct Google OAuth login
+    is_premium = Column(Boolean, default=False, nullable=False)
+    share_profile_memory = Column(Boolean, default=True, nullable=False)
+    about_user = Column(Text, nullable=True)             # User biography/preferences
+    response_style = Column(Text, nullable=True)         # Custom tone instructions
+    personal_profile = Column(Text, default="{}", nullable=False)  # Auto-extracted categorized JSON profile
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class UserFact(Base):
+    """
+    User Memory Vault.
+    Stores extracted facts, biographical notes, and details about the user
+    extracted from their chat history for personalization.
+    """
+    __tablename__ = "user_facts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=False)
+    fact = Column(Text, nullable=False)
+    category = Column(String(100), nullable=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    user = relationship("User", backref="facts")
+
+
 class Message(Base):
     """
     Relational Chat Message Node Store.
@@ -34,20 +70,62 @@ class Message(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     session_id = Column(String(100), index=True, nullable=False)
     branch_id = Column(String(100), default="main", nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), index=True, nullable=True)
     parent_node_id = Column(String(36), ForeignKey("messages.id"), index=True, nullable=True)
     role = Column(String(50), nullable=False)  # 'user', 'assistant', 'system_summary'
     content = Column(Text, nullable=False)
     model_used = Column(String(100), nullable=True)
     timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
     is_condensed = Column(Boolean, default=False, nullable=False)  # True if archived into summary card
+    is_pinned = Column(Boolean, default=False, nullable=False)
 
     # Self-referential relationship for branching tree traversal
     parent = relationship("Message", remote_side=[id], backref="children")
+    user = relationship("User", backref="messages")
 
 
 def init_db():
     """Initializes tables on Neon PostgreSQL / SQLite."""
     Base.metadata.create_all(bind=engine)
+    
+    # Dynamic schema fallback: Add missing columns if they don't exist
+    from sqlalchemy import text
+    db = SessionLocal()
+    try:
+        # Check if messages table has user_id and is_pinned columns
+        if engine.dialect.name == "postgresql":
+            db.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS user_id VARCHAR(36) REFERENCES users(id);"))
+            db.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE;"))
+            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS about_user TEXT;"))
+            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS response_style TEXT;"))
+            db.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS personal_profile TEXT DEFAULT '{}';"))
+        else:
+            # SQLite fallback: catch exceptions if columns already exist
+            try:
+                db.execute(text("ALTER TABLE messages ADD COLUMN user_id VARCHAR(36) REFERENCES users(id);"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE messages ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE;"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE users ADD COLUMN about_user TEXT;"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE users ADD COLUMN response_style TEXT;"))
+            except Exception:
+                pass
+            try:
+                db.execute(text("ALTER TABLE users ADD COLUMN personal_profile TEXT DEFAULT '{}';"))
+            except Exception:
+                pass
+        db.commit()
+    except Exception as e:
+        print(f"WARNING: Schema migration failed: {e}")
+    finally:
+        db.close()
 
 
 def save_message(
@@ -56,7 +134,8 @@ def save_message(
     content: str,
     parent_node_id: str = None,
     branch_id: str = "main",
-    model_used: str = None
+    model_used: str = None,
+    user_id: str = None
 ) -> Message:
     """Saves a fresh conversation node to PostgreSQL, supporting parent links."""
     db = SessionLocal()
@@ -67,7 +146,8 @@ def save_message(
             content=content,
             parent_node_id=parent_node_id,
             branch_id=branch_id,
-            model_used=model_used
+            model_used=model_used,
+            user_id=user_id
         )
         db.add(msg)
         db.commit()
@@ -229,5 +309,35 @@ def get_all_session_nodes(session_id: str) -> list:
         for n in nodes:
             db.expunge(n)
         return nodes
+    finally:
+        db.close()
+
+
+def get_user_by_email(email: str) -> User:
+    """Queries user record by email."""
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.email == email).first()
+        if user:
+            db.expunge(user)
+        return user
+    finally:
+        db.close()
+
+
+def create_user(email: str, password_hash: str = None, is_premium: bool = False) -> User:
+    """Creates a new registered user in the database."""
+    db = SessionLocal()
+    try:
+        user = User(
+            email=email,
+            password_hash=password_hash,
+            is_premium=is_premium
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        db.expunge(user)
+        return user
     finally:
         db.close()

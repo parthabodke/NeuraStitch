@@ -58,7 +58,7 @@ def get_embedding(text: str, api_key: str = None, keys: dict = None) -> List[flo
 
 
 def ensure_collection():
-    """Dynamically creates the Qdrant collection and indexes session_id and message_id for high-speed cloud queries."""
+    """Dynamically creates the Qdrant collection and indexes fields for high-speed cloud queries."""
     from qdrant_client.models import PayloadSchemaType
     try:
         # Check if collection exists
@@ -76,6 +76,13 @@ def ensure_collection():
             field_schema=PayloadSchemaType.KEYWORD
         )
         
+        # Dynamically create index for user_id to allow high-speed filtering
+        qdrant_client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name="user_id",
+            field_schema=PayloadSchemaType.KEYWORD
+        )
+        
         # Dynamically create index for message_id to allow deletes
         qdrant_client.create_payload_index(
             collection_name=COLLECTION_NAME,
@@ -86,10 +93,10 @@ def ensure_collection():
         print(f"WARNING: Qdrant check/creation or index creation failed: {e}")
 
 
-def upsert_message_vector(session_id: str, message_id: str, content: str, api_key: str = None, keys: dict = None):
+def upsert_message_vector(session_id: str, message_id: str, content: str, user_id: str = None, api_key: str = None, keys: dict = None):
     """
     Computes text embedding and registers a new vector in Qdrant Cloud
-    associated with the relational message ID.
+    associated with the relational message ID and owner user ID.
     """
     ensure_collection()
     
@@ -105,17 +112,18 @@ def upsert_message_vector(session_id: str, message_id: str, content: str, api_ke
                 payload={
                     "session_id": session_id,
                     "message_id": message_id,
-                    "content": content
+                    "content": content,
+                    "user_id": user_id
                 }
             )
         ]
     )
 
 
-def search_similar_message_ids(session_id: str, query: str, top_k: int = 4, api_key: str = None, keys: dict = None) -> List[str]:
+def search_similar_message_ids(session_id: str, query: str, user_id: str = None, top_k: int = 4, api_key: str = None, keys: dict = None) -> List[str]:
     """
     Vectorizes the query and retrieves matched historical message UUIDs
-    scoped strictly to the user's session.
+    scoped strictly to the user's session and tenant isolation.
     """
     if not query.strip():
         return []
@@ -124,20 +132,29 @@ def search_similar_message_ids(session_id: str, query: str, top_k: int = 4, api_
     
     query_vector = get_embedding(query, api_key=api_key, keys=keys)
     
+    must_conditions = [
+        FieldCondition(
+            key="session_id",
+            match=MatchValue(value=session_id)
+        )
+    ]
+    if user_id:
+        must_conditions.append(
+            FieldCondition(
+                key="user_id",
+                match=MatchValue(value=user_id)
+            )
+        )
+        
+    query_filter = Filter(must=must_conditions)
+    
     results = []
     try:
         if hasattr(qdrant_client, "query_points"):
             results_obj = qdrant_client.query_points(
                 collection_name=COLLECTION_NAME,
                 query=query_vector,
-                query_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="session_id",
-                            match=MatchValue(value=session_id)
-                        )
-                    ]
-                ),
+                query_filter=query_filter,
                 limit=top_k
             )
             # Scored points reside inside the .points attribute of QueryResponse
@@ -147,28 +164,14 @@ def search_similar_message_ids(session_id: str, query: str, top_k: int = 4, api_
             results = qdrant_client.search(
                 collection_name=COLLECTION_NAME,
                 query_vector=query_vector,
-                query_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="session_id",
-                            match=MatchValue(value=session_id)
-                        )
-                    ]
-                ),
+                query_filter=query_filter,
                 limit=top_k
             )
         elif hasattr(qdrant_client, "search_points"):
             results = qdrant_client.search_points(
                 collection_name=COLLECTION_NAME,
                 query_vector=query_vector,
-                query_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="session_id",
-                            match=MatchValue(value=session_id)
-                        )
-                    ]
-                ),
+                query_filter=query_filter,
                 limit=top_k
             )
         else:
