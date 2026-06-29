@@ -40,8 +40,10 @@ import {
 import '@xyflow/react/dist/style.css'
 
 import { db, type LocalNode } from '../../lib/db'
+import { encryptKey, decryptKey } from '../../lib/crypto'
+import posthog from 'posthog-js'
 
-const BACKEND_URL = 'http://localhost:8000'
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 
 // --- Custom React Flow Node Component ---
 const CustomNode = ({ data }: any) => {
@@ -89,7 +91,7 @@ const CustomNode = ({ data }: any) => {
           <div className="flex items-center gap-1.5">
             {data.isActive && (
               <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse">
-                Active Target
+                Active
               </span>
             )}
             {data.is_pinned && (
@@ -219,6 +221,15 @@ export default function PaidPlayground() {
   const [groqKey, setGroqKey] = useState('')
   const [openrouterKey, setOpenrouterKey] = useState('')
 
+  // Encrypted Local Storage PIN States
+  const [isLocked, setIsLocked] = useState(false)
+  const [pin, setPin] = useState('')
+  const [pinError, setPinError] = useState('')
+  const [unlockedPin, setUnlockedPin] = useState('')
+  const [promptCreatePin, setPromptCreatePin] = useState(false)
+  const [createPin, setCreatePin] = useState('')
+  const [confirmPin, setConfirmPin] = useState('')
+
   // Concealed visual eye flags
   const [showOpenai, setShowOpenai] = useState(false)
   const [showGemini, setShowGemini] = useState(false)
@@ -294,20 +305,104 @@ export default function PaidPlayground() {
       setSessionId(savedSession)
       localStorage.setItem('NS_SESSION_ID', savedSession)
 
-      setOpenaiKey(localStorage.getItem('NS_OPENAI_KEY') || '')
-      setGeminiKey(localStorage.getItem('NS_GEMINI_KEY') || '')
-      setGroqKey(localStorage.getItem('NS_GROQ_KEY') || '')
-      setOpenrouterKey(localStorage.getItem('NS_OPENROUTER_KEY') || '')
-
+      const isEncrypted = localStorage.getItem('NS_KEYS_ENCRYPTED') === 'true'
       const savedToken = localStorage.getItem('token')
+
+      if (isEncrypted && savedToken) {
+        setIsLocked(true)
+      } else {
+        setOpenaiKey(localStorage.getItem('NS_OPENAI_KEY') || '')
+        setGeminiKey(localStorage.getItem('NS_GEMINI_KEY') || '')
+        setGroqKey(localStorage.getItem('NS_GROQ_KEY') || '')
+        setOpenrouterKey(localStorage.getItem('NS_OPENROUTER_KEY') || '')
+      }
+
       if (savedToken) {
         setToken(savedToken)
         setStage('wallet')
+        
+        // Identify active user in PostHog on reload
+        const savedUserId = localStorage.getItem('user_id')
+        const savedEmail = localStorage.getItem('user_email')
+        const savedIsPremium = localStorage.getItem('is_premium')
+        if (savedUserId) {
+          try {
+            posthog.identify(savedUserId, {
+              email: savedEmail || '',
+              is_premium: savedIsPremium === 'true'
+            })
+          } catch (phError) {
+            console.error("Failed to identify user in PostHog:", phError)
+          }
+        }
       } else {
         setStage('auth')
       }
     }
   }, [])
+
+  const handleUnlock = async (enteredPin: string) => {
+    try {
+      const encOpenai = localStorage.getItem('NS_OPENAI_KEY') || ''
+      const encGemini = localStorage.getItem('NS_GEMINI_KEY') || ''
+      const encGroq = localStorage.getItem('NS_GROQ_KEY') || ''
+      const encOpenrouter = localStorage.getItem('NS_OPENROUTER_KEY') || ''
+      
+      const decryptedOpenai = encOpenai ? await decryptKey(encOpenai, enteredPin) : ''
+      const decryptedGemini = encGemini ? await decryptKey(encGemini, enteredPin) : ''
+      const decryptedGroq = encGroq ? await decryptKey(encGroq, enteredPin) : ''
+      const decryptedOpenrouter = encOpenrouter ? await decryptKey(encOpenrouter, enteredPin) : ''
+
+      setOpenaiKey(decryptedOpenai)
+      setGeminiKey(decryptedGemini)
+      setGroqKey(decryptedGroq)
+      setOpenrouterKey(decryptedOpenrouter)
+      
+      setUnlockedPin(enteredPin)
+      setIsLocked(false)
+      setPinError('')
+      setPin('')
+    } catch (err) {
+      setPinError('Incorrect PIN. Please try again.')
+    }
+  }
+
+  const handleCreateAndProceed = async () => {
+    if (!/^\d{4}$/.test(createPin)) {
+      setPinError("PIN must be exactly 4 digits.")
+      return
+    }
+    if (createPin !== confirmPin) {
+      setPinError("PINs do not match.")
+      return
+    }
+    try {
+      const encOpenai = await encryptKey(openaiKey, createPin)
+      const encGemini = await encryptKey(geminiKey, createPin)
+      const encGroq = await encryptKey(groqKey, createPin)
+      const encOpenrouter = await encryptKey(openrouterKey, createPin)
+      
+      localStorage.setItem('NS_OPENAI_KEY', encOpenai)
+      localStorage.setItem('NS_GEMINI_KEY', encGemini)
+      localStorage.setItem('NS_GROQ_KEY', encGroq)
+      localStorage.setItem('NS_OPENROUTER_KEY', encOpenrouter)
+      localStorage.setItem('NS_KEYS_ENCRYPTED', 'true')
+      
+      setUnlockedPin(createPin)
+      setPromptCreatePin(false)
+      setPinError('')
+      
+      fetchAvailableModels({
+        openai: openaiKey,
+        gemini: geminiKey,
+        groq: groqKey,
+        openrouter: openrouterKey
+      })
+      setStage('playground')
+    } catch (err) {
+      setPinError("Failed to encrypt and save keys.")
+    }
+  }
 
   // --- Fetch Cloud Sessions List ---
   const fetchCloudSessions = useCallback(async () => {
@@ -497,13 +592,46 @@ export default function PaidPlayground() {
   // --- Authentication Sign Out ---
   const handleLogout = () => {
     if (confirm("Are you sure you want to log out from this session?")) {
+      // Clear authentication metadata
       localStorage.removeItem('token')
       localStorage.removeItem('user_email')
       localStorage.removeItem('user_id')
       localStorage.removeItem('is_premium')
+      
+      // Clear browser workspace session context and keys to prevent leaks across logins
+      localStorage.removeItem('NS_SESSION_ID')
+      localStorage.removeItem('NS_OPENAI_KEY')
+      localStorage.removeItem('NS_GEMINI_KEY')
+      localStorage.removeItem('NS_GROQ_KEY')
+      localStorage.removeItem('NS_OPENROUTER_KEY')
+      
+      // Reset React state variables
       setToken(null)
+      setSessionId('session-default')
+      setCloudSessions([])
+      setNodes([])
+      setEdges([])
+      setActiveLeafNodeId(null)
+      setActiveBranchId('main')
+      setInput('')
+      setStreamedAssistantText('')
+      setActivePathMessages([])
+      
+      setOpenaiKey('')
+      setGeminiKey('')
+      setGroqKey('')
+      setOpenrouterKey('')
+      
+      setUserProfile({
+        biographical: {},
+        professional: { skills: [] },
+        interests: { likes: [], dislikes: [], topics: [] },
+        other_notes: []
+      })
+      
       setShowSettingsModal(false)
       setStage('auth')
+      showToast("Logged out successfully.", "success")
     }
   }
 
@@ -522,9 +650,12 @@ export default function PaidPlayground() {
       })
       if (res.ok) {
         const data = await res.json()
-        setAvailableModels(data.models || [])
-        if (data.models && data.models.length > 0 && !data.models.includes(activeModel)) {
-          setActiveModel(data.models[0])
+        const models = data.models || []
+        setAvailableModels(models)
+        if (keysPayload.groq && models.includes('llama-3.1-8b-instant')) {
+          setActiveModel('llama-3.1-8b-instant')
+        } else if (models.length > 0 && !models.includes(activeModel)) {
+          setActiveModel(models[0])
         }
       }
     } catch (e) {
@@ -575,20 +706,34 @@ export default function PaidPlayground() {
   }
 
   // --- Proceed into visual playground sandbox ---
-  const handleProceed = () => {
-    localStorage.setItem('NS_OPENAI_KEY', openaiKey)
-    localStorage.setItem('NS_GEMINI_KEY', geminiKey)
-    localStorage.setItem('NS_GROQ_KEY', groqKey)
-    localStorage.setItem('NS_OPENROUTER_KEY', openrouterKey)
-    
-    fetchAvailableModels({
-      openai: openaiKey,
-      gemini: geminiKey,
-      groq: groqKey,
-      openrouter: openrouterKey
-    })
-    
-    setStage('playground')
+  const handleProceed = async () => {
+    if (unlockedPin) {
+      try {
+        const encOpenai = await encryptKey(openaiKey, unlockedPin)
+        const encGemini = await encryptKey(geminiKey, unlockedPin)
+        const encGroq = await encryptKey(groqKey, unlockedPin)
+        const encOpenrouter = await encryptKey(openrouterKey, unlockedPin)
+        
+        localStorage.setItem('NS_OPENAI_KEY', encOpenai)
+        localStorage.setItem('NS_GEMINI_KEY', encGemini)
+        localStorage.setItem('NS_GROQ_KEY', encGroq)
+        localStorage.setItem('NS_OPENROUTER_KEY', encOpenrouter)
+        localStorage.setItem('NS_KEYS_ENCRYPTED', 'true')
+        
+        fetchAvailableModels({
+          openai: openaiKey,
+          gemini: geminiKey,
+          groq: groqKey,
+          openrouter: openrouterKey
+        })
+        setStage('playground')
+      } catch (err) {
+        // paid page does not have showToast, we use simple console/alert or local error state if needed, but paid page has toaster if defined or we can check. Wait, let's see if there is toasts state in paid page. We'll verify or just use standard alert or simple catch.
+        console.error("Failed to encrypt and save keys:", err)
+      }
+    } else {
+      setPromptCreatePin(true)
+    }
   }
 
   // --- Node Branching Callback ---
@@ -1021,7 +1166,7 @@ export default function PaidPlayground() {
               <Brain className="w-7 h-7" />
             </div>
             <h2 className="text-2xl font-extrabold text-white">Secure SaaS Gateway</h2>
-            <p className="text-xs text-slate-400 mt-2">Access your multi-device synced cloud session workspace</p>
+            <p className="text-xs text-slate-400 mt-2">Access your multi-device synced cloud session workspace using your Google Account</p>
           </div>
 
           {authError && (
@@ -1030,51 +1175,12 @@ export default function PaidPlayground() {
             </div>
           )}
 
-          <form onSubmit={handleAuthSubmit} className="space-y-5">
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Email Address</label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@domain.com"
-                required
-                className="w-full px-4 py-3 rounded-xl glass-input text-white text-xs font-sans border border-slate-800 bg-[#0d1222]/50 focus:border-indigo-500 transition-all outline-none"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider">Password</label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                className="w-full px-4 py-3 rounded-xl glass-input text-white text-xs font-sans border border-slate-800 bg-[#0d1222]/50 focus:border-indigo-500 transition-all outline-none"
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="flex items-center justify-center gap-2 w-full py-3.5 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/25 transition-all mt-4 cursor-pointer"
-            >
-              {authMode === 'login' ? 'Access Workspace' : 'Initialize Account'}
-            </button>
-          </form>
-
-          <div className="relative flex py-4 items-center">
-            <div className="flex-grow border-t border-slate-800"></div>
-            <span className="flex-shrink mx-4 text-[10px] text-slate-500 uppercase font-semibold">or</span>
-            <div className="flex-grow border-t border-slate-800"></div>
-          </div>
-
           <button
             onClick={handleGoogleLogin}
             type="button"
-            className="flex items-center justify-center gap-2.5 w-full py-3 px-6 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white text-xs font-bold transition-all cursor-pointer hover:border-indigo-500/50 shadow-md"
+            className="flex items-center justify-center gap-2.5 w-full py-4 px-6 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-white text-sm font-bold transition-all cursor-pointer hover:border-indigo-500/50 shadow-md"
           >
-            <svg className="w-4 h-4 mr-0.5" viewBox="0 0 24 24" fill="currentColor">
+            <svg className="w-4 h-4 mr-1.5" viewBox="0 0 24 24" fill="currentColor">
               <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
               <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
               <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05" />
@@ -1083,22 +1189,9 @@ export default function PaidPlayground() {
             Continue with Google
           </button>
 
-          <div className="mt-8 text-center text-xs text-slate-500">
-            {authMode === 'login' ? (
-              <span>
-                Don't have an account?{' '}
-                <button onClick={() => setAuthMode('register')} className="text-indigo-400 hover:underline font-semibold cursor-pointer">
-                  Create Account
-                </button>
-              </span>
-            ) : (
-              <span>
-                Already have an account?{' '}
-                <button onClick={() => setAuthMode('login')} className="text-indigo-400 hover:underline font-semibold cursor-pointer">
-                  Sign In
-                </button>
-              </span>
-            )}
+          <div className="mt-8 text-center text-[10px] text-slate-500 leading-relaxed">
+            By signing in, you agree to our Terms of Service & Privacy Policy.<br />
+            <span className="text-indigo-400 font-semibold mt-1 inline-block">Beta testing registration runs exclusively via Google Sign-in.</span>
           </div>
         </div>
       </div>
@@ -1106,6 +1199,144 @@ export default function PaidPlayground() {
   }
 
   // --- Form View ---
+  if (isLocked) {
+    return (
+      <div className="relative min-h-screen flex items-center justify-center bg-[#070b13] px-4 overflow-hidden animate-fade-in">
+        <div className="glowing-bg-layer" />
+        <div className="glowing-bg-layer-secondary" />
+
+        <div className="w-full max-w-md p-8 rounded-2xl glass-panel relative z-10 shadow-2xl text-center border border-slate-800">
+          <div className="flex flex-col items-center justify-center space-y-6 py-6">
+            <div className="p-3.5 rounded-2xl bg-purple-500/10 border border-purple-500/20 text-purple-400">
+              <Key className="w-8 h-8 animate-pulse" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-extrabold text-white mb-2">Vault Locked</h2>
+              <p className="text-slate-400 text-sm">Your API credentials are encrypted. Enter your 4-digit PIN to unlock them.</p>
+            </div>
+            
+            <div className="w-full max-w-xs space-y-4">
+              <input
+                type="password"
+                maxLength={4}
+                value={pin}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, ''); // Numeric only
+                  setPin(val);
+                  if (val.length === 4) {
+                    handleUnlock(val);
+                  }
+                }}
+                placeholder="••••"
+                className="w-full text-center px-4 py-3 rounded-xl glass-input text-white text-xl font-bold tracking-widest outline-none border border-slate-800 focus:border-purple-500/50"
+              />
+              
+              {pinError && (
+                <p className="text-rose-400 text-xs font-semibold animate-pulse">{pinError}</p>
+              )}
+
+              <button
+                onClick={() => handleUnlock(pin)}
+                className="w-full py-3 px-6 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-sm font-semibold shadow-lg shadow-purple-600/20 transition-all"
+              >
+                Unlock Wallet
+              </button>
+
+              <button
+                onClick={() => {
+                  if (confirm("Resetting will delete all saved API keys. Are you sure?")) {
+                    localStorage.removeItem('NS_OPENAI_KEY');
+                    localStorage.removeItem('NS_GEMINI_KEY');
+                    localStorage.removeItem('NS_GROQ_KEY');
+                    localStorage.removeItem('NS_OPENROUTER_KEY');
+                    localStorage.removeItem('NS_KEYS_ENCRYPTED');
+                    setIsLocked(false);
+                    setUnlockedPin('');
+                    setPin('');
+                    setPinError('');
+                    setOpenaiKey('');
+                    setGeminiKey('');
+                    setGroqKey('');
+                    setOpenrouterKey('');
+                  }
+                }}
+                className="text-xs text-slate-500 hover:text-slate-300 underline block mx-auto mt-2"
+              >
+                Forgot PIN / Reset Wallet
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (promptCreatePin) {
+    return (
+      <div className="relative min-h-screen flex items-center justify-center bg-[#070b13] px-4 overflow-hidden animate-fade-in">
+        <div className="glowing-bg-layer" />
+        <div className="glowing-bg-layer-secondary" />
+
+        <div className="w-full max-w-md p-8 rounded-2xl glass-panel relative z-10 shadow-2xl border border-slate-800">
+          <div className="flex flex-col items-center justify-center space-y-6 py-6 text-center">
+            <div className="p-3.5 rounded-2xl bg-purple-500/10 border border-purple-500/20 text-purple-400">
+              <Key className="w-8 h-8" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-extrabold text-white mb-2">Secure Your Keys</h2>
+              <p className="text-slate-400 text-sm">Please create a 4-digit PIN to encrypt your keys locally in this browser.</p>
+            </div>
+
+            <div className="w-full max-w-xs space-y-4 text-left">
+              <div className="space-y-1">
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Create 4-Digit PIN</label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  value={createPin}
+                  onChange={(e) => setCreatePin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="••••"
+                  className="w-full text-center px-4 py-2.5 rounded-xl glass-input text-white text-lg font-bold tracking-widest outline-none border border-slate-800 focus:border-purple-500/50"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Confirm PIN</label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  value={confirmPin}
+                  onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="••••"
+                  className="w-full text-center px-4 py-2.5 rounded-xl glass-input text-white text-lg font-bold tracking-widest outline-none border border-slate-800 focus:border-purple-500/50"
+                />
+              </div>
+
+              {pinError && (
+                <p className="text-rose-400 text-xs font-semibold text-center animate-pulse">{pinError}</p>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setPromptCreatePin(false)}
+                  className="w-1/2 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold border border-slate-700 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreateAndProceed}
+                  className="w-1/2 py-3 px-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold shadow-lg shadow-purple-600/20 transition-all"
+                >
+                  Encrypt & Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (stage === 'wallet') {
     return (
       <div className="relative min-h-screen flex items-center justify-center bg-[#070b13] px-4 overflow-hidden">

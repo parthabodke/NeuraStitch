@@ -9,10 +9,12 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@sentry/react": "^10.62.0",
     "@xyflow/react": "^12.10.2",
     "dexie": "^4.4.2",
     "lucide-react": "^0.331.0",
     "next": "^14.1.0",
+    "posthog-js": "^1.395.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },

@@ -1,12 +1,27 @@
 # nextgen-core/backend/main.py
 import os
-from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, Query, Depends, status
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks, Query, Depends, status, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 import json
 from datetime import datetime
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+import sentry_sdk
+
+sentry_dsn = os.getenv("SENTRY_DSN")
+if sentry_dsn:
+    sentry_sdk.init(
+        dsn=sentry_dsn,
+        traces_sample_rate=1.0,
+        profiles_sample_rate=1.0,
+    )
+    print("INFO: Sentry SDK initialized for error and performance tracking.")
+
 
 from database import (
     init_db,
@@ -36,13 +51,24 @@ from auth import (
 )
 from google_oauth import exchange_google_code
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="NeuraStitch AI (NextGen Core)")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Enable CORS for the Next.js React frontend
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "*")
+if allowed_origins_str == "*":
+    allowed_origins = ["*"]
+    allow_credentials = False
+else:
+    allowed_origins = [origin.strip() for origin in allowed_origins_str.split(",") if origin.strip()]
+    allow_credentials = True
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your Next.js frontend domain
-    allow_credentials=False,
+    allow_origins=allowed_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -87,41 +113,20 @@ class GoogleCallbackRequest(BaseModel):
 
 @app.post("/api/auth/register")
 def register(req: UserRegisterRequest):
-    """Manual email/password registration endpoint."""
-    existing = get_user_by_email(req.email)
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="A user with this email already exists."
-        )
-    
-    hashed = hash_password(req.password)
-    user = create_user(email=req.email, password_hash=hashed)
-    
-    token = create_access_token(data={"user_id": user.id, "email": user.email})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {"id": user.id, "email": user.email, "is_premium": user.is_premium}
-    }
+    """Manual email/password registration endpoint (disabled in Beta)."""
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Manual email/password registration is disabled for the Beta testing phase. Please sign in with Google OAuth."
+    )
 
 
 @app.post("/api/auth/login")
 def login(req: UserLoginRequest):
-    """Manual email/password credentials validation endpoint."""
-    user = get_user_by_email(req.email)
-    if not user or not user.password_hash or not verify_password(req.password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password."
-        )
-        
-    token = create_access_token(data={"user_id": user.id, "email": user.email})
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {"id": user.id, "email": user.email, "is_premium": user.is_premium}
-    }
+    """Manual email/password credentials validation endpoint (disabled in Beta)."""
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Manual email/password login is disabled for the Beta testing phase. Please sign in with Google OAuth."
+    )
 
 
 @app.post("/api/auth/google/callback")
@@ -373,7 +378,9 @@ def export_branch_json(message_id: str, current_user_id: str = Depends(get_curre
 
 
 @app.post("/chat")
+@limiter.limit("15/minute")
 async def chat(
+    request: Request,
     req: ChatRequest,
     background_tasks: BackgroundTasks,
     current_user_id: str = Depends(get_current_user_id),
@@ -603,7 +610,9 @@ async def chat(
 
 
 @app.post("/chat/stateless")
+@limiter.limit("15/minute")
 async def chat_stateless(
+    request: Request,
     messages: List[Dict[str, str]],
     active_model: str = Query(...),
     x_openai_key: Optional[str] = Header(None, alias="X-OpenAI-Key"),
@@ -925,7 +934,9 @@ def get_session_tree(session_id: str, current_user_id: str = Depends(get_current
 
 
 @app.post("/api/sync/push")
+@limiter.limit("10/minute")
 def sync_push(
+    request: Request,
     req: SyncPushRequest,
     current_user_id: str = Depends(get_current_user_id),
     x_openrouter_key: Optional[str] = Header(None, alias="X-Openrouter-Key")

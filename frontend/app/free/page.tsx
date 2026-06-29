@@ -34,8 +34,9 @@ import {
 import '@xyflow/react/dist/style.css'
 
 import { db, getLocalPathToNode, type LocalNode, type LocalSession } from '../../lib/db'
+import { encryptKey, decryptKey } from '../../lib/crypto'
 
-const BACKEND_URL = 'http://localhost:8000'
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
 
 // --- Custom React Flow Node Component ---
 const CustomNode = ({ data }: any) => {
@@ -75,7 +76,7 @@ const CustomNode = ({ data }: any) => {
           </span>
           {data.isActive && (
             <span className="flex items-center gap-1 px-2 py-0.5 rounded-full text-[9px] font-bold uppercase bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 animate-pulse">
-              Active Target
+              Active
             </span>
           )}
         </div>
@@ -150,6 +151,15 @@ export default function FreePlayground() {
   const [geminiKey, setGeminiKey] = useState('')
   const [groqKey, setGroqKey] = useState('')
   const [openrouterKey, setOpenrouterKey] = useState('')
+
+  // Encrypted Local Storage PIN States
+  const [isLocked, setIsLocked] = useState(false)
+  const [pin, setPin] = useState('')
+  const [pinError, setPinError] = useState('')
+  const [unlockedPin, setUnlockedPin] = useState('')
+  const [promptCreatePin, setPromptCreatePin] = useState(false)
+  const [createPin, setCreatePin] = useState('')
+  const [confirmPin, setConfirmPin] = useState('')
 
 
 
@@ -244,13 +254,81 @@ export default function FreePlayground() {
   // --- Initialize Local Sessions & Credentials ---
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      setOpenaiKey(localStorage.getItem('NS_OPENAI_KEY') || '')
-      setGeminiKey(localStorage.getItem('NS_GEMINI_KEY') || '')
-      setGroqKey(localStorage.getItem('NS_GROQ_KEY') || '')
-      setOpenrouterKey(localStorage.getItem('NS_OPENROUTER_KEY') || '')
+      const isEncrypted = localStorage.getItem('NS_KEYS_ENCRYPTED') === 'true'
+      if (isEncrypted) {
+        setIsLocked(true)
+      } else {
+        setOpenaiKey(localStorage.getItem('NS_OPENAI_KEY') || '')
+        setGeminiKey(localStorage.getItem('NS_GEMINI_KEY') || '')
+        setGroqKey(localStorage.getItem('NS_GROQ_KEY') || '')
+        setOpenrouterKey(localStorage.getItem('NS_OPENROUTER_KEY') || '')
+      }
       loadLocalSessions()
     }
   }, [])
+
+  const handleUnlock = async (enteredPin: string) => {
+    try {
+      const encOpenai = localStorage.getItem('NS_OPENAI_KEY') || ''
+      const encGemini = localStorage.getItem('NS_GEMINI_KEY') || ''
+      const encGroq = localStorage.getItem('NS_GROQ_KEY') || ''
+      const encOpenrouter = localStorage.getItem('NS_OPENROUTER_KEY') || ''
+      
+      const decryptedOpenai = encOpenai ? await decryptKey(encOpenai, enteredPin) : ''
+      const decryptedGemini = encGemini ? await decryptKey(encGemini, enteredPin) : ''
+      const decryptedGroq = encGroq ? await decryptKey(encGroq, enteredPin) : ''
+      const decryptedOpenrouter = encOpenrouter ? await decryptKey(encOpenrouter, enteredPin) : ''
+
+      setOpenaiKey(decryptedOpenai)
+      setGeminiKey(decryptedGemini)
+      setGroqKey(decryptedGroq)
+      setOpenrouterKey(decryptedOpenrouter)
+      
+      setUnlockedPin(enteredPin)
+      setIsLocked(false)
+      setPinError('')
+      setPin('')
+    } catch (err) {
+      setPinError('Incorrect PIN. Please try again.')
+    }
+  }
+
+  const handleCreateAndProceed = async () => {
+    if (!/^\d{4}$/.test(createPin)) {
+      setPinError("PIN must be exactly 4 digits.")
+      return
+    }
+    if (createPin !== confirmPin) {
+      setPinError("PINs do not match.")
+      return
+    }
+    try {
+      const encOpenai = await encryptKey(openaiKey, createPin)
+      const encGemini = await encryptKey(geminiKey, createPin)
+      const encGroq = await encryptKey(groqKey, createPin)
+      const encOpenrouter = await encryptKey(openrouterKey, createPin)
+      
+      localStorage.setItem('NS_OPENAI_KEY', encOpenai)
+      localStorage.setItem('NS_GEMINI_KEY', encGemini)
+      localStorage.setItem('NS_GROQ_KEY', encGroq)
+      localStorage.setItem('NS_OPENROUTER_KEY', encOpenrouter)
+      localStorage.setItem('NS_KEYS_ENCRYPTED', 'true')
+      
+      setUnlockedPin(createPin)
+      setPromptCreatePin(false)
+      setPinError('')
+      
+      fetchAvailableModels({
+        openai: openaiKey,
+        gemini: geminiKey,
+        groq: groqKey,
+        openrouter: openrouterKey
+      })
+      setStage('playground')
+    } catch (err) {
+      setPinError("Failed to encrypt and save keys.")
+    }
+  }
 
   const loadLocalSessions = async () => {
     const list = await db.sessions.orderBy('last_active').reverse().toArray()
@@ -286,9 +364,12 @@ export default function FreePlayground() {
       })
       if (res.ok) {
         const data = await res.json()
-        setAvailableModels(data.models || [])
-        if (data.models && data.models.length > 0 && !data.models.includes(activeModel)) {
-          setActiveModel(data.models[0])
+        const models = data.models || []
+        setAvailableModels(models)
+        if (keysPayload.groq && models.includes('llama-3.1-8b-instant')) {
+          setActiveModel('llama-3.1-8b-instant')
+        } else if (models.length > 0 && !models.includes(activeModel)) {
+          setActiveModel(models[0])
         }
       }
     } catch (e) {
@@ -299,20 +380,33 @@ export default function FreePlayground() {
   }
 
   // --- Proceed into visual playground sandbox ---
-  const handleProceed = () => {
-    localStorage.setItem('NS_OPENAI_KEY', openaiKey)
-    localStorage.setItem('NS_GEMINI_KEY', geminiKey)
-    localStorage.setItem('NS_GROQ_KEY', groqKey)
-    localStorage.setItem('NS_OPENROUTER_KEY', openrouterKey)
-    
-    fetchAvailableModels({
-      openai: openaiKey,
-      gemini: geminiKey,
-      groq: groqKey,
-      openrouter: openrouterKey
-    })
-    
-    setStage('playground')
+  const handleProceed = async () => {
+    if (unlockedPin) {
+      try {
+        const encOpenai = await encryptKey(openaiKey, unlockedPin)
+        const encGemini = await encryptKey(geminiKey, unlockedPin)
+        const encGroq = await encryptKey(groqKey, unlockedPin)
+        const encOpenrouter = await encryptKey(openrouterKey, unlockedPin)
+        
+        localStorage.setItem('NS_OPENAI_KEY', encOpenai)
+        localStorage.setItem('NS_GEMINI_KEY', encGemini)
+        localStorage.setItem('NS_GROQ_KEY', encGroq)
+        localStorage.setItem('NS_OPENROUTER_KEY', encOpenrouter)
+        localStorage.setItem('NS_KEYS_ENCRYPTED', 'true')
+        
+        fetchAvailableModels({
+          openai: openaiKey,
+          gemini: geminiKey,
+          groq: groqKey,
+          openrouter: openrouterKey
+        })
+        setStage('playground')
+      } catch (err) {
+        showToast("Failed to encrypt and save keys.", "error")
+      }
+    } else {
+      setPromptCreatePin(true)
+    }
   }
 
   // --- Create New Session ---
@@ -735,6 +829,144 @@ export default function FreePlayground() {
   }
 
   // --- Form View ---
+  if (isLocked) {
+    return (
+      <div className="relative min-h-screen flex items-center justify-center bg-[#070b13] px-4 overflow-hidden animate-fade-in">
+        <div className="glowing-bg-layer" />
+        <div className="glowing-bg-layer-secondary" />
+
+        <div className="w-full max-w-md p-8 rounded-2xl glass-panel relative z-10 shadow-2xl text-center border border-slate-800">
+          <div className="flex flex-col items-center justify-center space-y-6 py-6">
+            <div className="p-3.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+              <Key className="w-8 h-8 animate-pulse" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-extrabold text-white mb-2">Vault Locked</h2>
+              <p className="text-slate-400 text-sm">Your API credentials are encrypted. Enter your 4-digit PIN to unlock them.</p>
+            </div>
+            
+            <div className="w-full max-w-xs space-y-4">
+              <input
+                type="password"
+                maxLength={4}
+                value={pin}
+                onChange={(e) => {
+                  const val = e.target.value.replace(/\D/g, ''); // Numeric only
+                  setPin(val);
+                  if (val.length === 4) {
+                    handleUnlock(val);
+                  }
+                }}
+                placeholder="••••"
+                className="w-full text-center px-4 py-3 rounded-xl glass-input text-white text-xl font-bold tracking-widest outline-none border border-slate-800 focus:border-indigo-500/50"
+              />
+              
+              {pinError && (
+                <p className="text-rose-400 text-xs font-semibold animate-pulse">{pinError}</p>
+              )}
+
+              <button
+                onClick={() => handleUnlock(pin)}
+                className="w-full py-3 px-6 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-semibold shadow-lg shadow-indigo-600/20 transition-all"
+              >
+                Unlock Wallet
+              </button>
+
+              <button
+                onClick={() => {
+                  if (confirm("Resetting will delete all saved API keys. Are you sure?")) {
+                    localStorage.removeItem('NS_OPENAI_KEY');
+                    localStorage.removeItem('NS_GEMINI_KEY');
+                    localStorage.removeItem('NS_GROQ_KEY');
+                    localStorage.removeItem('NS_OPENROUTER_KEY');
+                    localStorage.removeItem('NS_KEYS_ENCRYPTED');
+                    setIsLocked(false);
+                    setUnlockedPin('');
+                    setPin('');
+                    setPinError('');
+                    setOpenaiKey('');
+                    setGeminiKey('');
+                    setGroqKey('');
+                    setOpenrouterKey('');
+                  }
+                }}
+                className="text-xs text-slate-500 hover:text-slate-300 underline block mx-auto mt-2"
+              >
+                Forgot PIN / Reset Wallet
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (promptCreatePin) {
+    return (
+      <div className="relative min-h-screen flex items-center justify-center bg-[#070b13] px-4 overflow-hidden animate-fade-in">
+        <div className="glowing-bg-layer" />
+        <div className="glowing-bg-layer-secondary" />
+
+        <div className="w-full max-w-md p-8 rounded-2xl glass-panel relative z-10 shadow-2xl border border-slate-800">
+          <div className="flex flex-col items-center justify-center space-y-6 py-6 text-center">
+            <div className="p-3.5 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
+              <Key className="w-8 h-8" />
+            </div>
+            <div>
+              <h2 className="text-2xl font-extrabold text-white mb-2">Secure Your Keys</h2>
+              <p className="text-slate-400 text-sm">Please create a 4-digit PIN to encrypt your keys locally in this browser.</p>
+            </div>
+
+            <div className="w-full max-w-xs space-y-4 text-left">
+              <div className="space-y-1">
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Create 4-Digit PIN</label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  value={createPin}
+                  onChange={(e) => setCreatePin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="••••"
+                  className="w-full text-center px-4 py-2.5 rounded-xl glass-input text-white text-lg font-bold tracking-widest outline-none border border-slate-800 focus:border-indigo-500/50"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Confirm PIN</label>
+                <input
+                  type="password"
+                  maxLength={4}
+                  value={confirmPin}
+                  onChange={(e) => setConfirmPin(e.target.value.replace(/\D/g, ''))}
+                  placeholder="••••"
+                  className="w-full text-center px-4 py-2.5 rounded-xl glass-input text-white text-lg font-bold tracking-widest outline-none border border-slate-800 focus:border-indigo-500/50"
+                />
+              </div>
+
+              {pinError && (
+                <p className="text-rose-400 text-xs font-semibold text-center animate-pulse">{pinError}</p>
+              )}
+
+              <div className="flex gap-3 pt-2">
+                <button
+                  onClick={() => setPromptCreatePin(false)}
+                  className="w-1/2 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold border border-slate-700 transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreateAndProceed}
+                  className="w-1/2 py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-lg shadow-indigo-600/20 transition-all"
+                >
+                  Encrypt & Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   if (stage === 'wallet') {
     return (
       <div className="relative min-h-screen flex items-center justify-center bg-[#070b13] px-4 overflow-hidden">

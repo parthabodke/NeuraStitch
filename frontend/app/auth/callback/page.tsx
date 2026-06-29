@@ -4,6 +4,7 @@
 import React, { useEffect, useState, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Loader2, ShieldAlert, CheckCircle } from 'lucide-react'
+import posthog from 'posthog-js'
 
 function CallbackHandler() {
   const router = useRouter()
@@ -21,7 +22,8 @@ function CallbackHandler() {
 
     async function exchangeCode() {
       try {
-        const response = await fetch('http://localhost:8000/api/auth/google/callback', {
+        const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8000'
+        const response = await fetch(`${backendUrl}/api/auth/google/callback`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -41,6 +43,16 @@ function CallbackHandler() {
         localStorage.setItem('user_email', data.user.email)
         localStorage.setItem('user_id', data.user.id)
         localStorage.setItem('is_premium', String(data.user.is_premium))
+
+        // Identify user in PostHog
+        try {
+          posthog.identify(data.user.id, {
+            email: data.user.email,
+            is_premium: data.user.is_premium
+          })
+        } catch (phError) {
+          console.error("Failed to identify user in PostHog:", phError)
+        }
 
         setStatus('success')
         
